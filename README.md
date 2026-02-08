@@ -1,16 +1,54 @@
-This repository contains all of the code and scripts necessary to train the models associated with the AAAI'26 paper "[A Benchmark Dataset for Spatially Aligned Road Damage Assessment in Small Uncrewed Aerial Systems Disaster Imagery](https://arxiv.org/pdf/2512.12128)"
+# Satellite Road Damage Assessment (RDA)
 
-/src contains all of the source code needed to train and inference the ML models presented as baselines in this paper
-/scripts contains all of the scripts and slurm jobfiles needed to run the training pipelines for the ML models presented as baselines in this paper
+A simplified tool to detect road damage (cracks, flooding, debris) from satellite imagery using a pre-trained UNet model (CRASAR RDA).
 
-All labels and imagery associated with this paper are hosted online at [The CRASAR-U-DROIDs HuggingFace Repo](https://huggingface.co/datasets/CRASAR/CRASAR-U-DROIDs).
+## Features
+- **Map Interface**: Select any location on earth via Streamlit UI.
+- **Historical Imagery**: Access Esri Wayback archives to analyze past events (e.g., Feb 2023 Earthquake).
+- **Road Masking**: Automatically fetches OSM road data to focus analysis on drivable surfaces.
+- **Damage Visualization**: Overlays damage predictions (Green=Safe, Yellow=Partial, Red=Destroyed).
 
-The file "Baseline Model Training - Details.csv" contains the hardware details for all of the model training runs used to establish the baseline models.
+## Installation
 
-The file "requirements.txt" contains all of the python dependencies that were used in this work. All dependencies can be install with the command "pip install -r requirements.txt"
+1.  **Clone the repository**
+2.  **Create a Virtual Environment**:
+    ```bash
+    python -m venv venv
+    venv\Scripts\activate  # Windows
+    # source venv/bin/activate # Linux/Mac
+    ```
+3.  **Install Dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-The baseline models are available at at the CRASAR HuggingFace organization page under the [AAAI'25 - sUAS Road Damage Assessment](https://huggingface.co/collections/CRASAR/aaai26-suas-road-damage-assessment) Model Collection.
+## Model Setup
+The model file (~930MB) is **not included** in this repository due to size limits.
+You must download it separately:
 
+1.  **Run the download script**:
+    ```bash
+    python download_model.py
+    ```
+    *This will fetch the `RDA_UNet_simple_noattention.ckpt` from Hugging Face and place it in `models/`.*
 
+## Usage
 
+### 1. Web Interface (Recommended)
+Run the Streamlit app:
+```bash
+streamlit run app.py
+```
+- Opens a web UI.
+- Select a location on the map.
+- Choose a historical date (optional).
+- Click **Analyze**.
 
+### 2. Command Line (Advanced)
+Run analysis on specific coordinates:
+```bash
+python simple_satellite_demo.py --lat 36.227222 --lon 36.165555 --zoom 18 --model_path models/CRASAR.../model.ckpt
+```
+
+## Credits
+Based on the CRASAR / RDA UNet research.
