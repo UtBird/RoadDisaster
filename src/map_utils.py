@@ -13,7 +13,7 @@ def latlon_to_tile(lat, lon, zoom):
     """
     return mercantile.tile(lon, lat, zoom)
 
-def fetch_satellite_tile(lat, lon, zoom=19):
+def fetch_satellite_tile(lat, lon, zoom=19, provider='esri', wayback_id=None, custom_url=None):
     """
     Fetches a satellite tile from a public XYZ source (Esri World Imagery).
     Returns the PIL Image and the tile bounds (west, south, east, north).
@@ -25,7 +25,17 @@ def fetch_satellite_tile(lat, lon, zoom=19):
     
     # Alternative: Google Satellite (Requires key usually, but mt1.google.com sometimes works for testing)
     # Let's stick to Esri for now as it is often used in open mapping.
-    url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{tile.y}/{tile.x}"
+    # Alternative: Google Satellite (mt1.google.com)
+    # url = f"https://mt1.google.com/vt/lyrs=s&x={tile.x}&y={tile.y}&z={zoom}"
+    
+    if provider == 'google':
+        url = f"https://mt1.google.com/vt/lyrs=s&x={tile.x}&y={tile.y}&z={zoom}"
+    elif provider == 'custom' and custom_url:
+        # Expecting {x}, {y}, {z} in the URL
+        url = custom_url.replace("{x}", str(tile.x)).replace("{y}", str(tile.y)).replace("{z}", str(zoom))
+    else:
+        # Default to Esri
+        url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{tile.y}/{tile.x}"
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
@@ -165,6 +175,66 @@ def save_data_for_inference(img, pixel_roads, output_dir, file_prefix="map_sampl
         json.dump(json_data, f, indent=2)
         
     return img_path, json_path
+
+def search_oam_images(bbox, date_start=None, date_end=None, limit=50):
+    """
+    Search OpenAerialMap for images within a bbox and date range.
+    bbox: (west, south, east, north)
+    date_start, date_end: datetime objects or YYYY-MM-DD strings
+    """
+    url = "https://api.openaerialmap.org/meta"
+    
+    params = {
+        "bbox": f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
+        "limit": limit,
+        "order_by": "acquisition_end",
+        "sort": "desc"
+    }
+    
+    if date_start and date_end:
+        # OAM expects timestamp range usually? Or just filter results.
+        # The API documentation says 'acquisition_from' and 'acquisition_to' might work, 
+        # or we verify the results.
+        # Let's try 'acquisition_from' and 'acquisition_to' based on common OAM usage.
+        if isinstance(date_start, str): params["acquisition_from"] = date_start
+        else: params["acquisition_from"] = date_start.strftime("%Y-%m-%d")
+            
+        if isinstance(date_end, str): params["acquisition_to"] = date_end
+        else: params["acquisition_to"] = date_end.strftime("%Y-%m-%d")
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        results = []
+        if 'results' in data:
+            for item in data['results']:
+                # We need the tile URL. usually in 'properties' -> 'tms' or 'wmts'
+                props = item.get('properties', {}) or {} # Sometimes properties is None?
+                # Actually OAM API response structure:
+                # { results: [ { uuid, title, properties: { tms, ... }, bbox, ... } ] }
+                
+                tms_url = item.get('tms') or item.get('properties', {}).get('tms')
+                if not tms_url:
+                    # Sometimes provided as 'wmts'
+                    tms_url = item.get('wmts') or item.get('properties', {}).get('wmts')
+                
+                if tms_url:
+                    results.append({
+                        "id": item.get('_id') or item.get('uuid'),
+                        "title": item.get('title', 'Unknown Image'),
+                        "provider": item.get('provider', 'Unknown'),
+                        "date": item.get('acquisition_end', item.get('acquisition_start', 'Unknown Date')),
+                        "resolution": item.get('resolution', 'N/A'),
+                        "tms_url": tms_url,
+                        "bbox": item.get('bbox')
+                    })
+        return results
+    except Exception as e:
+        print(f"OAM Search failed: {e}")
+        return []
+
 
 if __name__ == "__main__":
     # Test
