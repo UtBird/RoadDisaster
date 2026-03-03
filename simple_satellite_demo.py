@@ -62,68 +62,81 @@ def fetch_satellite_tile(lat, lon, zoom=19, wayback_id=None, provider='esri', cu
         return None, None
 
 def fetch_osm_line_pixels(bounds, width, height):
-    """Fetch OSM roads and convert to list of pixel polygons (thick lines)."""
+    """Fetch OSM roads using optimized 'out geom' for maximum speed and stability."""
     
     bbox_str = f"{bounds.south},{bounds.west},{bounds.north},{bounds.east}"
+    # OPTIMIZATION: Use 'out geom' instead of recursion. Much lighter on servers.
     query = f"""
-    [out:json][timeout:25];
-    (
-      way["highway"]({bbox_str});
-    );
-    (._;>;);
-    out body;
+    [out:json][timeout:60];
+    way["highway"]({bbox_str});
+    out geom;
     """
     
-    # Updated Robust Endpoints
+    # 2025 High-Availability Mirrors & Robust Rotation
     endpoints = [
         "https://overpass-api.de/api/interpreter",
         "https://lz4.overpass-api.de/api/interpreter",
-        "https://z.overpass-api.de/api/interpreter",
-        "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
+        "https://overpass.openstreetmap.fr/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.nchc.org.tw/api/interpreter",
+        "https://overpass.osm.ch/api/interpreter",
+        "https://overpass.be/api/interpreter"
     ]
+    
+    import random
+    import time
+    random.shuffle(endpoints)
+    
+    # Realistic User-Agent to avoid 403s
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RoadDamageApp/1.2",
+        "Referer": "https://overpass-turbo.eu/"
+    }
     
     data = None
     for endpoint in endpoints:
-        try:
-            print(f"Fetching OSM from {endpoint}...")
-            r = requests.post(endpoint, data={'data': query}, timeout=25)
-            if r.status_code == 200:
-                data = r.json()
-                if 'elements' in data and len(data['elements']) > 0:
-                    break # Found data!
-            else:
-                print(f"Failed with {endpoint}: Status {r.status_code}")
-        except Exception as e:
-            print(f"Failed with {endpoint}: {e}")
+        for attempt in range(2): 
+            try:
+                print(f"Fetching OSM from {endpoint}...")
+                # Increased timeout to 60s for heavy post-disaster areas
+                r = requests.post(endpoint, data={'data': query}, headers=headers, timeout=60)
+                
+                if r.status_code == 200:
+                    data = r.json()
+                    if 'elements' in data and len(data['elements']) > 0:
+                        break 
+                elif r.status_code == 429 or r.status_code >= 500:
+                    print(f"Server busy ({r.status_code}). Retrying in 3s...")
+                    time.sleep(3)
+                    continue 
+                else:
+                    print(f"Failed with {endpoint}: Status {r.status_code}")
+                    break 
+            except Exception as e:
+                print(f"Connection error on {endpoint}: {e}")
+                time.sleep(1) # Small pause before next mirror
+                break 
+        if data: break
             
     if not data or 'elements' not in data:
-        print("All Overpass servers failed or returned no data.")
+        print("CRITICAL: All Overpass API methods failed. Continuing without mask.")
         return []
         
-    # Process JSON
-    nodes = {}
-    if 'elements' in data:
-        for el in data['elements']:
-            if el['type'] == 'node':
-                nodes[el['id']] = (el['lon'], el['lat'])
+    # Process Optimized JSON (out geom contains lat/lon inside way)
+    road_polygons = []
+    for el in data.get('elements', []):
+        if el['type'] == 'way' and 'geometry' in el:
+            points = []
+            for pt in el['geometry']:
+                lon, lat = pt['lon'], pt['lat']
+                px = (lon - bounds.west) / (bounds.east - bounds.west) * width
+                py = (bounds.north - lat) / (bounds.north - bounds.south) * height
+                points.append([int(px), int(py)])
+            
+            if len(points) >= 2:
+                road_polygons.append(np.array(points, dtype=np.int32))
                 
-        # Ways
-        road_polygons = []
-        for el in data['elements']:
-            if el['type'] == 'way' and 'nodes' in el:
-                points = []
-                for node_id in el['nodes']:
-                    if node_id in nodes:
-                        lon, lat = nodes[node_id]
-                        px = (lon - bounds.west) / (bounds.east - bounds.west) * width
-                        py = (bounds.north - lat) / (bounds.north - bounds.south) * height
-                        points.append([int(px), int(py)])
-                
-                if len(points) >= 2:
-                    road_polygons.append(np.array(points, dtype=np.int32))
-                    
-        return road_polygons
-    return []
+    return road_polygons
 
 def parse_dms(dms_str):
     import re

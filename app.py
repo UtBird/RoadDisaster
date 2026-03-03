@@ -11,8 +11,28 @@ import requests
 import datetime
 import traceback
 
+# Hardcoded Hyperparameters for AttentionUNet (Full)
+HYPERPARAMETERS = {
+    "input": {
+        "model_parameters": {
+            "layers": {
+                "inc": {"out_channels": 32, "dilation": 1, "kernel_size": 5, "padding_mode": "zeros"},
+                "down_1": {"in_channels": 32, "out_channels": 64, "dilation": 1, "kernel_size": 5, "padding_mode": "zeros"},
+                "down_2": {"in_channels": 64, "out_channels": 128, "dilation": 1, "kernel_size": 5, "padding_mode": "zeros"},
+                "down_3": {"in_channels": 128, "out_channels": 256, "dilation": 1, "kernel_size": 5, "padding_mode": "zeros"},
+                "down_4": {"in_channels": 256, "out_channels": 512, "dilation": 1, "kernel_size": 5, "padding_mode": "zeros"},
+                "down_5": {"in_channels": 512, "out_channels": 1024, "dilation": 1, "kernel_size": 5, "padding_mode": "zeros"},
+                "up_0": {"attention": True, "bilinear": False, "in_channels": 1024, "out_channels": 512},
+                "up_1": {"attention": True, "bilinear": False, "in_channels": 512, "out_channels": 256},
+                "up_2": {"attention": True, "bilinear": False, "in_channels": 256, "out_channels": 128},
+                "up_3": {"attention": True, "bilinear": False, "in_channels": 128, "out_channels": 64},
+                "up_4": {"attention": True, "bilinear": False, "in_channels": 64, "out_channels": 32}
+            }
+        }
+    }
+}
 # Import project utilities
-from simple_satellite_demo import fetch_satellite_tile, fetch_osm_line_pixels, HYPERPARAMETERS, parse_dms
+from simple_satellite_demo import fetch_satellite_tile, fetch_osm_line_pixels, parse_dms
 from src.map_utils import search_oam_images
 from simple_model_defs import MaskedUNet
 
@@ -62,6 +82,42 @@ def get_wayback_versions():
         return versions
     except Exception:
         return []
+
+def calculate_auto_threshold(damage_probs, road_mask, bias=0.0):
+    """
+    Enhanced Optimization: Peak-Aware Thresholding.
+    Determines if the road is clean before calculating a split.
+    """
+    road_pixels = damage_probs[road_mask > 0]
+    
+    if len(road_pixels) < 50:
+        return 0.5 + bias
+    
+    # 1. Cleanliness Check: We only reject as "clean" if the signal is EXTREMELY flat.
+    p95 = np.percentile(road_pixels, 95)
+    mean_val = np.mean(road_pixels)
+    
+    # If the road is virtually silent (95% under 0.05), it's definitely clean.
+    # We lowered this from 0.10 to 0.05 to catch very subtle debris.
+    if p95 < 0.05:
+        return 0.90 
+        
+    # 2. Otsu calculation (Mathematical split)
+    pixels_8bit = (np.clip(road_pixels, 0, 1) * 255).astype(np.uint8)
+    otsu_thresh_val, _ = cv2.threshold(pixels_8bit, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu_thresh = float(otsu_thresh_val) / 255.0
+    
+    # 3. Dynamic Floor based on average noise
+    # We want a floor that rejects tiny flickers but keeps real signal.
+    # Lowered the baseline floor to 0.08 to be "Ultra-Sensitive".
+    # Scaling factor lowered from 1.8x to 1.5x.
+    noise_floor = max(0.08, mean_val * 1.5)
+    
+    # Hybrid Result
+    optimized_thresh = max(noise_floor, otsu_thresh)
+    
+    # Apply user bias (bias is subtracted from threshold to increase sensitivity)
+    return np.clip(optimized_thresh + bias, 0.02, 0.95)
 
 # -----------------------------------------------------------------------------
 # Sidebar
@@ -146,22 +202,32 @@ with st.sidebar:
     with st.expander("⚙️ Fine-Tuning", expanded=True):
         zoom_level = st.slider("Zoom Level", 15, 20, 18)
         
-        st.markdown("#### Sensitivity Controls")
+        st.markdown("#### Analysis Parameters")
         
-        # LOWERED DEFAULT BOOSTER FROM 3.0 TO 1.5
-        damage_booster = st.slider("💥 Damage Signal Booster", 1.0, 10.0, 1.5, 0.5,
-                                 help="Multiplies the AI's confidence for damage.")
+        damage_booster = st.slider("🔥 Damage Sensitivity Booster", 1.0, 10.0, 3.5, 0.5,
+                                 help="Multiplies the AI's confidence for damage categories.")
         
-        sensitivity_threshold = st.slider("📉 Detection Threshold", 0.0, 1.0, 0.25, 0.05)
+        auto_threshold = st.toggle("🤖 Auto-Optimize Threshold", value=True, help="Uses modern hybrid logic to find the best threshold dynamically.")
+        
+        if not auto_threshold:
+            sensitivity_threshold = st.slider("📉 Detection Threshold", 0.0, 1.0, 0.25, 0.05)
+            auto_offset = 0.0
+        else:
+            sensitivity_threshold = 0.25 # Base
+            auto_offset = st.slider("⚖️ Auto-Sensitivity Bias", -0.5, 0.5, 0.0, 0.05, 
+                                   help="Adjust the auto-calculated threshold. Plus = More conservative, Minus = More sensitive.")
         
         line_width = st.slider("🖊️ Visualization Width", 5, 40, 15)
         
+        st.markdown("#### Model & Stability")
+        enable_tta = st.toggle("🚀 Test-Time Augmentation (TTA)", value=True, help="Analyze image at 4 rotations for maximum stability. (Slower but 4x more reliable)")
+        enable_smoothing = st.toggle("✨ Smooth Results", value=True, help="Apply Gaussian blur to probabilities to reduce pixel noise.")
+        
+        default_model = "models/CRASAR_Full_AttentionUNet/RDA_UNet_full_v1-epoch=02-step=1500-val_macro_iou=0.07566.ckpt"
+        model_path = st.text_input("📁 Model Checkpoint (.ckpt)", value=default_model)
+        
         debug_mode = st.checkbox("Show Debug Logs", value=True)
-
-    # Model Path
-    default_ckpt = "models/CRASAR_CRASAR-U-DROIDs-RDA_AAAI26_Simple_VanillaUNet/RDA_UNet_simple_noattention-epoch=05-step=3000-val_macro_iou=0.32182.ckpt"
-    model_path = st.text_input("Model Path", value=default_ckpt)
-
+    
     analyze_btn = st.button("🚀 Start Analysis", type="primary")
     
     if st.button("🔄 Reset Analysis"):
@@ -287,22 +353,29 @@ if analyze_btn:
                 status_text.text("3/4 Preprocessing...")
                 progress_bar.progress(60)
                 
+                # Ensure RGB (Removes Alpha channel that could mess up masking)
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                    
                 img_np = np.array(img)
                 img_float = img_np.astype(np.float32) / 255.0
                 mask_float = mask.astype(np.float32)
                 
                 input_data = np.dstack([img_float, mask_float])
-                input_tensor = torch.from_numpy(input_data).permute(2, 0, 1).unsqueeze(0)
                 
                 # 3. Load Model
                 status_text.text("Loading AI Model...")
                 try:
-                    model = MaskedUNet(n_channels=4, n_classes=4, hyperparameters=HYPERPARAMETERS, 
-                                    input_channel_mask_index=3, output_channel_background_index=0)
-                    
-                    checkpoint = torch.load(model_path, map_location="cpu")
-                    model.load_state_dict_from_ckpt(checkpoint["state_dict"])
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    model = MaskedUNet(n_channels=4, n_classes=11, hyperparameters=HYPERPARAMETERS, 
+                               input_channel_mask_index=3, output_channel_background_index=0)
+            
+                    ckpt = torch.load(model_path, map_location=device)
+                    # Handle lightning ckpt mapping
+                    state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+                    model.load_state_dict_from_ckpt(state_dict)
                     model.eval()
+                    model.to(device)
                 except Exception as e_model:
                      st.error(f"**FATAL ERROR:** Model Load Failed: {e_model}")
                      st.stop()
@@ -311,37 +384,82 @@ if analyze_btn:
                 status_text.text("4/4 Running AI Inference...")
                 progress_bar.progress(80)
                 
+                input_tensor = torch.from_numpy(input_data).permute(2, 0, 1).unsqueeze(0).to(device)
+                    
                 with torch.no_grad():
-                    preds = model(input_tensor) # (1, 4, H, W)
-                    probs = torch.softmax(preds, dim=1).squeeze().numpy() # (4, H, W)
-                    
-                    p_bg = probs[0]
+                    if enable_tta:
+                        # Test-Time Augmentation: Average the probabilities directly
+                        # MaskedUNet.forward already handles Softmax and Masking.
+                        sum_probs = None
+                        for rot in [0, 1, 2, 3]: # 0, 90, 180, 270 degrees
+                            aug_input = torch.rot90(input_tensor, k=rot, dims=[2, 3])
+                            # Masked probabilities from model
+                            pred_probs = model(aug_input) 
+                            # Rotate back
+                            inv_probs = torch.rot90(pred_probs, k=-rot, dims=[2, 3])
+                            
+                            if sum_probs is None:
+                                sum_probs = inv_probs
+                            else:
+                                sum_probs += inv_probs
+                        
+                        probs = (sum_probs / 4.0).squeeze().cpu().numpy()
+                    else:
+                        # Direct masked probabilities
+                        probs = model(input_tensor).squeeze().cpu().numpy()
+
+                    # Class mapping: Background=0, Road=1, Partial=2-6, Total=7-10
+                    p_background = probs[0]
                     p_road = probs[1]
-                    p_partial = probs[2]
-                    p_total = probs[3]
+                    p_partial = np.sum(probs[2:7], axis=0)
+                    p_total = np.sum(probs[7:11], axis=0)
                     
-                    # --- BOOSTER LOGIC ---
-                    p_partial_boosted = p_partial * damage_booster
-                    p_total_boosted = p_total * damage_booster
+                    # Apply Booster to damage signals
+                    p_partial_boosted = np.clip(p_partial * damage_booster, 0, 1)
+                    p_total_boosted = np.clip(p_total * damage_booster, 0, 1)
+
+                    if enable_smoothing:
+                        p_partial_boosted = cv2.GaussianBlur(p_partial_boosted, (5, 5), 0)
+                        p_total_boosted = cv2.GaussianBlur(p_total_boosted, (5, 5), 0)
+
+                    # 1. Initial prediction based on UNBOOSTED natural probabilities
+                    # This ensures Background (0) wins if it's the strongest natural signal.
+                    natural_scores = np.stack([p_background, p_road, p_partial, p_total])
+                    pred_labels = np.argmax(natural_scores, axis=0)
                     
-                    # Score
-                    scores = np.stack([p_bg, p_road, p_partial_boosted, p_total_boosted])
-                    pred_labels = np.argmax(scores, axis=0)
+                    # 2. Calculate damage ratio (only for pixels already identified as road/damage)
+                    # ratio = (damage) / (total road mass)
+                    damage_ratio = (p_partial_boosted + p_total_boosted) / (p_road + p_partial_boosted + p_total_boosted + 1e-6)
+                    damage_ratio = np.clip(damage_ratio, 0, 1)
                     
-                    # Ratio Logic
-                    sum_road_mass = p_road + p_partial_boosted + p_total_boosted + 1e-6
-                    damage_ratio = (p_partial_boosted + p_total_boosted) / sum_road_mass
-                    
-                    # Threshold Logic
-                    h, w = pred_labels.shape
-                    for r in range(h):
-                        for c in range(w):
-                            if pred_labels[r, c] != 0:
-                                if damage_ratio[r, c] > sensitivity_threshold:
+                    # 3. Threshold Optimization
+                    actual_threshold = sensitivity_threshold
+                    if auto_threshold:
+                        actual_threshold = calculate_auto_threshold(damage_ratio, mask, bias=auto_offset)
+                        if debug_mode:
+                            st.write(f"**DEBUG:** Dynamic Optimization Threshold: `{actual_threshold:.4f}`")
+
+                    # 4. Final Refinement
+                    h_res, w_res = pred_labels.shape
+                    for r in range(h_res):
+                        for c in range(w_res):
+                            # IMPORTANT: If model initially said Background (0), WE RESPECT THAT.
+                            # We only refine pixels the model thinks are not background.
+                            if pred_labels[r, c] != 0: 
+                                is_naturally_damaged = pred_labels[r, c] >= 2
+                                
+                                # Decision: Damage vs Clean Road
+                                # We allow a 40% threshold reduction if the model naturally suspected damage
+                                effective_thresh = actual_threshold * 0.6 if is_naturally_damaged else actual_threshold
+                                
+                                if damage_ratio[r, c] > effective_thresh:
+                                    # Pick between partial and total
                                     if p_total_boosted[r, c] > p_partial_boosted[r, c]:
-                                        pred_labels[r, c] = 3
+                                        pred_labels[r, c] = 3 # Total
                                     else:
-                                        pred_labels[r, c] = 2
+                                        pred_labels[r, c] = 2 # Partial
+                                else:
+                                    pred_labels[r, c] = 1 # Clean Road
                 
                 # SAVE TO SESSION STATE
                 st.session_state.analysis_result = {
@@ -353,7 +471,8 @@ if analyze_btn:
                     "p_damage_max": np.max(p_total),
                     "p_damage_boosted_max": np.max(p_total_boosted),
                     "booster": damage_booster,
-                    "threshold": sensitivity_threshold
+                    "threshold": actual_threshold,
+                    "is_auto": auto_threshold
                 }
                 
                 progress_bar.progress(100)
@@ -380,7 +499,7 @@ if st.session_state.analysis_result:
     
     with col1:
         st.markdown("**Original Satellite**")
-        st.image(res["original_img"], use_container_width=True)
+        st.image(res["original_img"], width="stretch")
     
     with col2:
         st.markdown("**Damage Detection**")
@@ -406,7 +525,7 @@ if st.session_state.analysis_result:
             blended = cv2.addWeighted(vis_img, 1-alpha, overlay, alpha, 0)
             vis_img[combined_mask] = blended[combined_mask]
             
-        st.image(vis_img, use_container_width=True)
+        st.image(vis_img, width="stretch")
 
     # Legend
     st.markdown("""
@@ -425,13 +544,21 @@ if st.session_state.analysis_result:
         hm = (res["damage_ratio"] * 255).astype(np.uint8)
         hm_c = cv2.applyColorMap(hm, cv2.COLORMAP_JET)
         hm_c[res["damage_ratio"] < 0.05] = 0
-        c1.image(hm_c, caption="Damage Probability Heatmap", use_container_width=True)
+        c1.image(hm_c, caption="Damage Probability Heatmap", width="stretch")
         
-        c2.info(f"""
-        **Stats:**
-        - Booster Factor: `{res['booster']}x`
-        - Threshold: `{res['threshold']}`
-        - Max Road Prob: `{res['p_road_max']:.3f}`
-        - Max Damage Prob (Boosted): `{res['p_damage_boosted_max']:.3f}`
-        - **Tip:** If damage is missed, increase Booster!
-        """)
+        with c2:
+            st.info(f"""
+            **Stats:**
+            - Booster Factor: `{res['booster']}x`
+            - Final Threshold: `{res['threshold']:.3f}` {'(🤖 Hybrid Auto)' if res.get('is_auto') else '(🛠️ Manual)'}
+            - Max Road Prob: `{res['p_road_max']:.3f}`
+            - Max Damage Ratio: `{np.max(res['damage_ratio']):.3f}`
+            """)
+            
+            # Probability Histogram
+            road_data = res["damage_ratio"][res["damage_ratio"] > 0.01]
+            if len(road_data) > 0:
+                st.caption("Distribution of Suspected Damage (Histogram)")
+                hist_vals, bin_edges = np.histogram(road_data, bins=20, range=(0, 1))
+                st.bar_chart(hist_vals)
+                st.caption(f"Current threshold ({res['threshold']:.2f}) cuts the bars at that level.")
