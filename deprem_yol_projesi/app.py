@@ -8,7 +8,6 @@ import torch
 import requests
 import datetime
 import traceback
-import osmnx as ox
 from PIL import Image
 import segmentation_models_pytorch as smp
 import math
@@ -256,7 +255,7 @@ with st.sidebar:
         line_width = st.slider("🖊️ Visualization Road Width", 2, 20, 6)
         
         st.markdown("#### Model Path")
-        model_path = st.text_input("📁 Pytorch Weights (.pth)", value="models/en_iyi_model.pth")
+        model_path = st.text_input("📁 Pytorch Weights (.pth)", value="models/en_iyi_model_cleaned.pth")
     
     analyze_btn = st.button("� Start Analysis", type="primary")
     if st.button("🔄 Reset Analysis"):
